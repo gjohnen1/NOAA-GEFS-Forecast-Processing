@@ -1,0 +1,20 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Data and output files (generated, not tracked)
+data/*.nc
+data/*.zarr
+data/basin_shapefiles/*
+data/processed_data/*
+
+# Log files
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
