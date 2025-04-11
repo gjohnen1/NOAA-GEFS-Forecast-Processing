@@ -155,11 +155,10 @@ def interpolate_to_hourly(ds, max_hours=240):
     
     # Create a new lead_time coordinate with integer hours from 1 to max_hours
     # We exclude hour 0 as requested, starting at hour 1
-    new_lead_time = np.arange(1, max_hours + 1, dtype=np.int64)
-    
-    # Convert the dataset to use the new integer lead_time dimension
-    # First, we need to select all but the first time step (to skip hour 0)
     ds_hourly = ds_hourly.isel(lead_time=slice(1, None))
+    
+    # Create the new lead_time values (integers from 1 to max_hours)
+    new_lead_time = np.arange(1, max_hours + 1)
     
     # Now assign the new coordinate
     ds_hourly = ds_hourly.assign_coords(lead_time=new_lead_time)
@@ -177,9 +176,11 @@ def interpolate_to_hourly(ds, max_hours=240):
     return ds_hourly
 
 
-def plot_ensemble_members(ds, basin=None, init_time=None, variable='temperature_2m', 
-                          output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
-    """Plot all ensemble members for a specific variable.
+def plot_leadtime_forecast(ds, basin=None, init_time=None, variable='temperature_2m', 
+                         output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
+    """Plot forecast data with lead_time in hours on the x-axis.
+    
+    This function plots all ensemble members with lead time in hours on the x-axis.
     
     Args:
         ds (xarray.Dataset): The forecast dataset
@@ -223,14 +224,18 @@ def plot_ensemble_members(ds, basin=None, init_time=None, variable='temperature_
     # Plot each ensemble member
     data_var = ds[variable]
     
-    # Determine the time dimension to use
-    time_dim = 'time' if 'time' in data_var.dims else 'valid_time'
-    if time_dim not in data_var.dims and 'lead_time' in data_var.dims:
-        # Use lead_time if time dimension is not available
-        time_dim = 'lead_time'
+    # Make sure we're using lead_time for the x-axis
+    if 'lead_time' not in data_var.dims:
+        print(f"No lead_time dimension found in the dataset. Available dimensions: {list(data_var.dims)}")
+        return None
     
-    # Plot the data
-    data_var.plot.line(x=time_dim, hue='ensemble_member', alpha=0.3, add_legend=False, ax=ax)
+    # Get the lead time values
+    lead_time = data_var.lead_time.values
+    
+    # Plot each ensemble member
+    for i, member in enumerate(data_var.ensemble_member.values):
+        member_data = data_var.sel(ensemble_member=member)
+        ax.plot(lead_time, member_data, alpha=0.3, linewidth=1)
     
     # Get units from attrs or use default
     units = data_var.attrs.get('units', '')
@@ -243,8 +248,17 @@ def plot_ensemble_members(ds, basin=None, init_time=None, variable='temperature_
     
     ax.set_title(title)
     ax.set_ylabel(f"{variable.replace('_', ' ').title()} ({units})")
-    ax.set_xlabel("Forecast Time")
+    ax.set_xlabel("Lead Time (hours)")
     ax.grid(True, alpha=0.3)
+    
+    # Improve x-axis for lead time in hours
+    # Add minor ticks every 24 hours (1 day)
+    ax.set_xticks(np.arange(0, max(lead_time) + 24, 24), minor=False)
+    
+    # Add day labels as secondary x-axis
+    secax = ax.secondary_xaxis('top', functions=(lambda x: x/24, lambda x: x*24))
+    secax.set_xlabel('Lead Time (days)')
+    secax.set_xticks(np.arange(0, max(lead_time)/24 + 1, 1))
     
     # Add a horizontal line at freezing point if temperature
     if 'temperature' in variable.lower() and units:
@@ -253,19 +267,10 @@ def plot_ensemble_members(ds, basin=None, init_time=None, variable='temperature_
         elif 'k' in units.lower():
             ax.axhline(y=273.15, color='blue', linestyle='--', alpha=0.7, label='Freezing Point (273.15K)')
     
-    # Customize legend
-    if len(ds.ensemble_member) > 10:
-        # Just add a note about ensemble members
-        plt.text(0.98, 0.02, f"Showing all {len(ds.ensemble_member)} ensemble members", 
-                 ha='right', va='bottom', transform=ax.transAxes,
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    else:
-        # Create a custom legend with a reasonable number of entries
-        legend_elements = [
-            Line2D([0], [0], color='C0', lw=1, alpha=0.7, 
-                   label=f'Ensemble {i+1}') for i in range(len(ds.ensemble_member))
-        ]
-        ax.legend(handles=legend_elements, loc='best')
+    # Add a note about ensemble members
+    plt.text(0.98, 0.02, f"Showing all {len(data_var.ensemble_member)} ensemble members", 
+             ha='right', va='bottom', transform=ax.transAxes,
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
     plt.tight_layout()
     
@@ -284,9 +289,9 @@ def plot_ensemble_members(ds, basin=None, init_time=None, variable='temperature_
             init_time_str = pd.to_datetime(init_time).strftime('%Y%m%d%H')
             filename += f"_init_{init_time_str}"
             
-        filepath = os.path.join(output_dir, f"{filename}_ensemble_members.png")
+        filepath = os.path.join(output_dir, f"{filename}_leadtime_forecast.png")
         plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
-        print(f"Saved ensemble members plot to {filepath}")
+        print(f"Saved lead time forecast plot to {filepath}")
     
     # Show or close the plot
     if show_plot:
@@ -297,9 +302,11 @@ def plot_ensemble_members(ds, basin=None, init_time=None, variable='temperature_
     return fig
 
 
-def plot_ensemble_statistics(ds, basin=None, init_time=None, variable='temperature_2m',
+def plot_leadtime_statistics(ds, basin=None, init_time=None, variable='temperature_2m',
                             output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
-    """Plot ensemble statistics (mean, median, min/max range, percentiles).
+    """Plot forecast statistics with lead_time in hours on the x-axis.
+    
+    This function plots mean, median, and ranges with lead time in hours on the x-axis.
     
     Args:
         ds (xarray.Dataset): The forecast dataset
@@ -320,7 +327,6 @@ def plot_ensemble_statistics(ds, basin=None, init_time=None, variable='temperatu
         return None
     
     # Use .load() to ensure data is in memory for faster processing
-    # Only load the necessary variable and dimensions
     data_subset = ds[variable].load()
     
     # Select specific basin - only select if needed
@@ -341,16 +347,12 @@ def plot_ensemble_statistics(ds, basin=None, init_time=None, variable='temperatu
             data_subset = data_subset.sel(init_time=latest_init_time)
             init_time = latest_init_time
     
-    # Determine the time dimension to use - do this only once
-    time_dim = next((dim for dim in ['time', 'valid_time', 'lead_time'] 
-                     if dim in data_subset.dims), None)
-    
-    if time_dim is None:
-        print(f"No time dimension found in the dataset. Available dimensions: {list(data_subset.dims)}")
+    # Make sure we're using lead_time for the x-axis
+    if 'lead_time' not in data_subset.dims:
+        print(f"No lead_time dimension found in the dataset. Available dimensions: {list(data_subset.dims)}")
         return None
     
-    # Calculate statistics all at once to minimize loop iterations
-    # Use dask optimized functions where possible
+    # Calculate statistics
     stats = {
         'mean': data_subset.mean(dim='ensemble_member'),
         'median': data_subset.median(dim='ensemble_member'),
@@ -363,38 +365,20 @@ def plot_ensemble_statistics(ds, basin=None, init_time=None, variable='temperatu
     stats['q25'] = quantiles.sel(quantile=0.25)
     stats['q75'] = quantiles.sel(quantile=0.75)
     
-    # Compute all statistics at once to optimize dask operations
+    # Compute all statistics at once to optimize operations
     stats = {k: v.compute() for k, v in stats.items()}
     
-    # Get time values once
-    time_coord = stats['mean'][time_dim]
+    # Get the lead time values
+    lead_time = data_subset.lead_time.values
     
-    if np.issubdtype(time_coord.dtype, np.timedelta64):
-        # Optimize timedelta handling
-        if init_time is not None:
-            base_time = pd.to_datetime(init_time)
-            # Vectorized operation to convert timedeltas to timestamps
-            time_values = base_time + pd.to_timedelta(time_coord.values)
-        else:
-            # Fast conversion to days for display
-            hours = time_coord.values.astype('timedelta64[h]').astype(float)
-            days = hours / 24.0
-            time_values = np.arange(len(days))
-            # Pre-calculate tick labels
-            tick_labels = [f"Day {d:.1f}" for d in days]
-    elif np.issubdtype(time_coord.dtype, np.datetime64):
-        time_values = time_coord.values  # Keep as numpy array for faster plotting
-    else:
-        time_values = time_coord.values
-    
-    # Create figure only after we know we have data
+    # Create figure
     fig, ax = plt.subplots(figsize=figsize)
     
     # Plot with optimized calls
-    ax.plot(time_values, stats['median'], 'b-', linewidth=2.5, label='Median')
-    ax.plot(time_values, stats['mean'], 'r-', linewidth=2.5, label='Mean')
-    ax.fill_between(time_values, stats['q25'], stats['q75'], color='b', alpha=0.2, label='25-75th Percentile')
-    ax.fill_between(time_values, stats['min'], stats['max'], color='b', alpha=0.1, label='Min-Max Range')
+    ax.plot(lead_time, stats['median'], 'b-', linewidth=2.5, label='Median')
+    ax.plot(lead_time, stats['mean'], 'r-', linewidth=2.5, label='Mean')
+    ax.fill_between(lead_time, stats['q25'], stats['q75'], color='b', alpha=0.2, label='25-75th Percentile')
+    ax.fill_between(lead_time, stats['min'], stats['max'], color='b', alpha=0.1, label='Min-Max Range')
     
     # Get units from attrs or use default
     units = data_subset.attrs.get('units', '')
@@ -402,25 +386,23 @@ def plot_ensemble_statistics(ds, basin=None, init_time=None, variable='temperatu
     # Set title and labels
     title = f"{variable.replace('_', ' ').title()} Forecast Distribution for {basin}"
     if init_time is not None:
-        # Format date string once
         init_time_str = pd.to_datetime(init_time).strftime('%Y-%m-%d %H:%M')
         title += f" (Init: {init_time_str})"
     
     ax.set_title(title)
     ax.set_ylabel(f"{variable.replace('_', ' ').title()} ({units})")
-    
-    # Set appropriate x-axis label
-    ax.set_xlabel("Time from Forecast Initialization" if time_dim == 'lead_time' else "Forecast Time")
+    ax.set_xlabel("Lead Time (hours)")
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best')
     
-    # Only format dates if needed
-    if np.issubdtype(time_coord.dtype, np.timedelta64) and init_time is None:
-        # Set pre-calculated tick labels
-        ax.set_xticks(time_values)
-        ax.set_xticklabels(tick_labels)
-    elif np.issubdtype(time_coord.dtype, np.datetime64):
-        fig.autofmt_xdate()
+    # Improve x-axis for lead time in hours
+    # Add minor ticks every 24 hours (1 day)
+    ax.set_xticks(np.arange(0, max(lead_time) + 24, 24), minor=False)
+    
+    # Add day labels as secondary x-axis
+    secax = ax.secondary_xaxis('top', functions=(lambda x: x/24, lambda x: x*24))
+    secax.set_xlabel('Lead Time (days)')
+    secax.set_xticks(np.arange(0, max(lead_time)/24 + 1, 1))
     
     plt.tight_layout()
     
@@ -436,13 +418,12 @@ def plot_ensemble_statistics(ds, basin=None, init_time=None, variable='temperatu
             filename_parts = [variable]
             
         if init_time is not None:
-            # Format date string once
             init_time_str = pd.to_datetime(init_time).strftime('%Y%m%d%H')
             filename_parts.append(f"init_{init_time_str}")
             
-        filepath = os.path.join(output_dir, f"{'_'.join(filename_parts)}_statistics.png")
+        filepath = os.path.join(output_dir, f"{'_'.join(filename_parts)}_leadtime_statistics.png")
         plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
-        print(f"Saved ensemble statistics plot to {filepath}")
+        print(f"Saved lead time statistics plot to {filepath}")
     
     # Show or close the plot
     if not show_plot:
@@ -451,17 +432,17 @@ def plot_ensemble_statistics(ds, basin=None, init_time=None, variable='temperatu
     return fig
 
 
-def plot_quantile_distribution(ds, basin=None, init_time=None, variable='temperature_2m',
-                              quantiles=[0.05, 0.25, 0.5, 0.75, 0.95],
-                              output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
-    """Plot quantile distribution across ensemble members.
+def plot_leadtime_comparison(ds, basin=None, init_time=None, variables=None,
+                           output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
+    """Plot multiple variables together with lead_time in hours on the x-axis.
+    
+    This function plots the mean of multiple variables together for comparison.
     
     Args:
         ds (xarray.Dataset): The forecast dataset
         basin (str, optional): Basin name to plot. If None, uses the first basin in the dataset.
         init_time (datetime or str, optional): Initialization time to plot. If None, uses the latest.
-        variable (str, optional): Variable to plot. Default is 'temperature_2m'.
-        quantiles (list, optional): List of quantiles to plot. Default is [0.05, 0.25, 0.5, 0.75, 0.95].
+        variables (list, optional): List of variables to plot. If None, uses common meteorological variables.
         output_dir (str, optional): Directory to save plot. If None, plot is not saved.
         show_plot (bool, optional): Whether to display the plot. Default is True.
         figsize (tuple, optional): Figure size as (width, height). Default is (16, 8).
@@ -479,11 +460,6 @@ def plot_quantile_distribution(ds, basin=None, init_time=None, variable='tempera
     else:
         basin = 'Basin'  # Generic name if basin dimension doesn't exist
     
-    # Check if the variable exists
-    if variable not in ds.data_vars:
-        print(f"Variable '{variable}' not found in dataset. Available variables: {list(ds.data_vars)}")
-        return None
-    
     # Select specific init time if provided, otherwise use the latest
     if init_time is not None:
         if 'init_time' in ds.dims:
@@ -493,39 +469,77 @@ def plot_quantile_distribution(ds, basin=None, init_time=None, variable='tempera
         ds = ds.sel(init_time=latest_init_time)
         init_time = latest_init_time
     
+    # If variables not provided, use common meteorological variables
+    if variables is None:
+        # Check which variables are available in the dataset
+        available_vars = []
+        common_vars = ['temperature_2m', 'precipitation', 'wind_speed_10m', 
+                       'relative_humidity_2m', 'surface_pressure']
+        for var in common_vars:
+            if var in ds.data_vars:
+                available_vars.append(var)
+        
+        if not available_vars:
+            print(f"No common meteorological variables found. Available variables: {list(ds.data_vars)}")
+            return None
+        
+        variables = available_vars[:3]  # Use up to 3 variables to avoid cluttering
+    
+    # Check if all requested variables exist
+    for var in variables:
+        if var not in ds.data_vars:
+            print(f"Variable '{var}' not found in dataset. Available variables: {list(ds.data_vars)}")
+            return None
+    
+    # Make sure lead_time exists
+    if 'lead_time' not in ds.dims:
+        print("No lead_time dimension found in the dataset.")
+        return None
+    
     # Create figure
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, axes = plt.subplots(len(variables), 1, figsize=figsize, sharex=True)
+    if len(variables) == 1:
+        axes = [axes]  # Make sure axes is always a list
     
-    # Calculate quantiles across ensemble members
-    quantile_data = ds[variable].quantile(quantiles, dim='ensemble_member')
+    # Get the lead time values
+    lead_time = ds.lead_time.values
     
-    # Determine the time dimension to use
-    time_dim = 'time' if 'time' in quantile_data.dims else 'valid_time'
-    if time_dim not in quantile_data.dims and 'lead_time' in quantile_data.dims:
-        # Use lead_time if time dimension is not available
-        time_dim = 'lead_time'
+    # Plot each variable in its own subplot
+    for i, var in enumerate(variables):
+        ax = axes[i]
+        
+        # Calculate mean across ensemble members
+        var_mean = ds[var].mean(dim='ensemble_member').compute()
+        
+        # Plot the mean
+        ax.plot(lead_time, var_mean, linewidth=2)
+        
+        # Get units from attrs or use default
+        units = ds[var].attrs.get('units', '')
+        
+        # Add labels
+        ax.set_ylabel(f"{var.replace('_', ' ').title()} ({units})")
+        ax.grid(True, alpha=0.3)
+        
+        # Add a title to the top subplot
+        if i == 0:
+            title = f"Forecast for {basin}"
+            if init_time is not None:
+                init_time_str = pd.to_datetime(init_time).strftime('%Y-%m-%d %H:%M')
+                title += f" (Init: {init_time_str})"
+            ax.set_title(title)
+            
+        # Add x-axis label only to bottom subplot
+        if i == len(variables) - 1:
+            ax.set_xlabel("Lead Time (hours)")
     
-    # Plot quantiles
-    quantile_data.plot(x=time_dim, hue='quantile', ax=ax)
+    # Improve x-axis for lead time in hours for the bottom subplot
+    axes[-1].set_xticks(np.arange(0, max(lead_time) + 24, 24), minor=False)
     
-    # Get units from attrs or use default
-    units = ds[variable].attrs.get('units', '')
-    
-    # Add title and labels
-    title = f"{variable.replace('_', ' ').title()} Forecast Quantiles for {basin}"
-    if init_time is not None:
-        init_time_str = pd.to_datetime(init_time).strftime('%Y-%m-%d %H:%M')
-        title += f" (Init: {init_time_str})"
-    
-    ax.set_title(title)
-    ax.set_ylabel(f"{variable.replace('_', ' ').title()} ({units})")
-    ax.set_xlabel("Forecast Time")
-    ax.grid(True, alpha=0.3)
-    
-    # Format legend labels to show percentiles
-    handles, labels = ax.get_legend_handles_labels()
-    percentile_labels = [f"{float(q)*100:.0f}th Percentile" for q in quantiles]
-    ax.legend(handles, percentile_labels, title='Forecast Uncertainty', loc='best')
+    # Add day labels as secondary x-axis to the bottom subplot
+    secax = axes[-1].secondary_xaxis('bottom', functions=(lambda x: x/24, lambda x: x*24))
+    secax.set_xlabel('Lead Time (days)')
+    secax.set_xticks(np.arange(0, max(lead_time)/24 + 1, 1))
     
     plt.tight_layout()
     
@@ -533,20 +547,22 @@ def plot_quantile_distribution(ds, basin=None, init_time=None, variable='tempera
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
         
-        # Create a filename with basin and init_time if available
+        # Create a filename
         if basin != 'Basin':
             basin_str = str(basin).replace("/", "_").replace(" ", "_")
-            filename = f"{basin_str}_{variable}"
+            var_str = "_".join([v.replace("_", "-") for v in variables])
+            filename = f"{basin_str}_{var_str}"
         else:
-            filename = f"{variable}"
+            var_str = "_".join([v.replace("_", "-") for v in variables])
+            filename = f"{var_str}"
             
         if init_time is not None:
             init_time_str = pd.to_datetime(init_time).strftime('%Y%m%d%H')
             filename += f"_init_{init_time_str}"
             
-        filepath = os.path.join(output_dir, f"{filename}_quantiles.png")
+        filepath = os.path.join(output_dir, f"{filename}_leadtime_comparison.png")
         plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
-        print(f"Saved quantile plot to {filepath}")
+        print(f"Saved lead time comparison plot to {filepath}")
     
     # Show or close the plot
     if show_plot:
@@ -555,32 +571,6 @@ def plot_quantile_distribution(ds, basin=None, init_time=None, variable='tempera
         plt.close()
         
     return fig
-
-
-def plot_basin_temperature_forecasts(combined_ds, output_dir=None, show_plot=True):
-    """Create plots for temperature forecasts for each basin.
-    
-    This function is maintained for backward compatibility.
-    It now calls the more comprehensive plot_basin_forecasts function.
-    
-    Args:
-        combined_ds (xarray.Dataset): Combined basin forecast dataset
-        output_dir (str, optional): Directory to save plots. If None, plots are not saved.
-        show_plot (bool, optional): Whether to display the plots. Default is True.
-    """
-    # Create a plots directory within the output directory
-    if output_dir is not None:
-        plots_dir = os.path.join(output_dir, "plots")
-    else:
-        plots_dir = None
-    
-    # Call the comprehensive plotting function with default parameters
-    return plot_basin_forecasts(
-        combined_ds, 
-        variables=['temperature_2m', 'precipitation'] if 'precipitation' in combined_ds.data_vars else ['temperature_2m'],
-        output_dir=plots_dir,
-        show_plot=show_plot
-    )
 
 
 def main():
@@ -616,7 +606,17 @@ def main():
             if combined_ds is not None:
                 # Create plots for each basin
                 plot_dir = os.path.join(output_dir, "plots")
-                plot_basin_temperature_forecasts(combined_ds, plot_dir)
+                os.makedirs(plot_dir, exist_ok=True)
+                
+                # Use the defined plotting functions instead
+                for basin in combined_ds.basin.values:
+                    print(f"Creating plots for basin: {basin}")
+                    # Plot temperature forecast
+                    if 'temperature_2m' in combined_ds.data_vars:
+                        plot_leadtime_forecast(combined_ds, basin=basin, variable='temperature_2m', 
+                                             output_dir=plot_dir, show_plot=False)
+                        plot_leadtime_statistics(combined_ds, basin=basin, variable='temperature_2m', 
+                                               output_dir=plot_dir, show_plot=False)
                 
                 print("\nConclusion:")
                 print("This script has:")
