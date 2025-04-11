@@ -14,6 +14,7 @@ import numpy as np
 import xarray as xr
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import warnings
 
 # Suppress warnings
@@ -68,17 +69,22 @@ def extract_forecast_for_basin(ds, basin_name, latitude, longitude, init_time=No
 
 
 def fetch_forecasts_for_basins(ds, centroids, init_time=None):
-    """Extract forecasts for all basin centroids.
+    """Extract forecasts for all basin centroids while preserving original dimensions.
     
     Args:
         ds (xarray.Dataset): NOAA GEFS forecast dataset
         centroids (pandas.DataFrame): DataFrame with basin centroid coordinates
-        init_time (str, optional): Initial forecast time. If None, use the latest.
+        init_time (str, optional): Initial forecast time. If None, use all available times.
         
     Returns:
-        list: List of forecast datasets for each basin
+        xarray.Dataset: Combined dataset with basin dimension replacing lat/lon
     """
-    basin_forecasts = []
+    # Select the init time if provided, otherwise use all times
+    if init_time is not None:
+        ds = ds.sel(init_time=init_time)
+    
+    # Create a list to store data for each basin
+    basin_data_list = []
     
     print(f"Extracting forecasts for {len(centroids)} basins...")
     for idx, row in centroids.iterrows():
@@ -88,257 +94,426 @@ def fetch_forecasts_for_basins(ds, centroids, init_time=None):
         
         print(f"Processing basin: {basin_name} (lat: {lat:.4f}, lon: {lon:.4f})")
         
-        # Extract forecast for this basin
-        basin_ds = extract_forecast_for_basin(ds, basin_name, lat, lon, init_time)
-        basin_forecasts.append(basin_ds)
+        # Extract forecast for this basin's location using nearest neighbor interpolation
+        basin_ds = ds.sel(latitude=lat, longitude=lon, method="nearest")
+        
+        # Add basin name as a coordinate
+        basin_ds = basin_ds.assign_coords(basin=basin_name)
+        basin_data_list.append(basin_ds)
     
-    return basin_forecasts
+    # Combine all basin datasets along a new 'basin' dimension
+    combined_ds = xr.concat(basin_data_list, dim="basin")
+    
+    print(f"Successfully extracted forecasts for {len(centroids)} basins")
+    print(f"Dataset dimensions: {dict(combined_ds.dims)}")
+    
+    return combined_ds
 
 
-def merge_basin_forecasts(basin_forecasts):
-    """Merge individual basin forecasts into a combined dataset.
+def plot_ensemble_members(ds, basin=None, init_time=None, variable='temperature_2m', 
+                          output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
+    """Plot all ensemble members for a specific variable.
     
     Args:
-        basin_forecasts (list): List of xarray.Dataset objects, one per basin
+        ds (xarray.Dataset): The forecast dataset
+        basin (str, optional): Basin name to plot. If None, uses the first basin in the dataset.
+        init_time (datetime or str, optional): Initialization time to plot. If None, uses the latest.
+        variable (str, optional): Variable to plot. Default is 'temperature_2m'.
+        output_dir (str, optional): Directory to save plot. If None, plot is not saved.
+        show_plot (bool, optional): Whether to display the plot. Default is True.
+        figsize (tuple, optional): Figure size as (width, height). Default is (16, 8).
+        dpi (int, optional): Resolution for saved figure. Default is 150.
         
     Returns:
-        xarray.Dataset: Combined dataset with all basin forecasts
+        matplotlib.figure.Figure: The generated figure
     """
-    if not basin_forecasts:
-        print("No basin forecasts to merge.")
+    # Select specific basin if provided
+    if basin is not None and 'basin' in ds.dims:
+        ds = ds.sel(basin=basin)
+    elif 'basin' in ds.dims:
+        basin = ds.basin.values[0]  # Use first basin if not specified
+        ds = ds.sel(basin=basin)
+    else:
+        basin = 'Basin'  # Generic name if basin dimension doesn't exist
+    
+    # Check if the variable exists
+    if variable not in ds.data_vars:
+        print(f"Variable '{variable}' not found in dataset. Available variables: {list(ds.data_vars)}")
         return None
     
-    # Create a basin dimension from the list of datasets
-    combined_ds = xr.concat(basin_forecasts, dim="basin")
+    # Select specific init time if provided, otherwise use the latest
+    if init_time is not None:
+        if 'init_time' in ds.dims:
+            ds = ds.sel(init_time=init_time, method='nearest')
+    elif 'init_time' in ds.dims:
+        latest_init_time = ds.init_time.values[-1]
+        ds = ds.sel(init_time=latest_init_time)
+        init_time = latest_init_time
     
-    # Initialize a new dataset with the required dimensions
-    new_ds = xr.Dataset()
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
     
-    # Add basin dimension
-    new_ds.coords['basin'] = combined_ds.basin.values
+    # Plot each ensemble member
+    data_var = ds[variable]
     
-    # Create an array of all unique valid times across all forecasts and init times
-    unique_times = sorted(np.unique(combined_ds.valid_time.values))
-    new_ds.coords['time'] = pd.DatetimeIndex(unique_times)
+    # Determine the time dimension to use
+    time_dim = 'time' if 'time' in data_var.dims else 'valid_time'
+    if time_dim not in data_var.dims and 'lead_time' in data_var.dims:
+        # Use lead_time if time dimension is not available
+        time_dim = 'lead_time'
     
-    # Create lead_time dimension in hours (0 to 840 hours = 35 days)
-    # Each lead time represents hours from the forecast initialization
-    max_lead_hours = 840  # 35 days in hours
-    lead_times = np.arange(0, max_lead_hours + 1, 3)  # 3-hourly steps
-    new_ds.coords['lead_time'] = lead_times
+    # Plot the data
+    data_var.plot.line(x=time_dim, hue='ensemble_member', alpha=0.3, add_legend=False, ax=ax)
     
-    # Add ensemble member dimension
-    new_ds.coords['ensemble_member'] = combined_ds.ensemble_member.values
+    # Get units from attrs or use default
+    units = data_var.attrs.get('units', '')
     
-    print(f"Setting up dataset with dimensions: basin ({len(new_ds.basin)}), time ({len(new_ds.time)}), "
-          f"lead_time ({len(new_ds.lead_time)}), ensemble_member ({len(new_ds.ensemble_member)})")
+    # Add title and labels
+    title = f"{variable.replace('_', ' ').title()} Forecast for {basin}"
+    if init_time is not None:
+        init_time_str = pd.to_datetime(init_time).strftime('%Y-%m-%d %H:%M')
+        title += f" (Init: {init_time_str})"
     
-    # Get list of variables to process
-    var_names = list(combined_ds.data_vars)
+    ax.set_title(title)
+    ax.set_ylabel(f"{variable.replace('_', ' ').title()} ({units})")
+    ax.set_xlabel("Forecast Time")
+    ax.grid(True, alpha=0.3)
     
-    # Process each variable
-    for var_name in var_names:
-        print(f"Processing variable: {var_name}")
-        var = combined_ds[var_name]
+    # Add a horizontal line at freezing point if temperature
+    if 'temperature' in variable.lower() and units:
+        if 'c' in units.lower():
+            ax.axhline(y=0, color='blue', linestyle='--', alpha=0.7, label='Freezing Point (0°C)')
+        elif 'k' in units.lower():
+            ax.axhline(y=273.15, color='blue', linestyle='--', alpha=0.7, label='Freezing Point (273.15K)')
+    
+    # Customize legend
+    if len(ds.ensemble_member) > 10:
+        # Just add a note about ensemble members
+        plt.text(0.98, 0.02, f"Showing all {len(ds.ensemble_member)} ensemble members", 
+                 ha='right', va='bottom', transform=ax.transAxes,
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    else:
+        # Create a custom legend with a reasonable number of entries
+        legend_elements = [
+            Line2D([0], [0], color='C0', lw=1, alpha=0.7, 
+                   label=f'Ensemble {i+1}') for i in range(len(ds.ensemble_member))
+        ]
+        ax.legend(handles=legend_elements, loc='best')
+    
+    plt.tight_layout()
+    
+    # Save the plot if output directory is provided
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
         
-        # Check if the variable has an ensemble_member dimension
-        if 'ensemble_member' in var.dims:
-            # Create a new array with dimensions: basin, time, lead_time, ensemble_member
-            # Initially filled with NaN values
-            shape = (len(new_ds.basin), len(new_ds.time), len(new_ds.lead_time), len(new_ds.ensemble_member))
-            new_data = np.full(shape, np.nan)
-            
-            # Map the data into the new array structure
-            for b_idx, basin in enumerate(new_ds.basin.values):
-                basin_data = var.sel(basin=basin)
-                
-                # For each initialization time in the dataset
-                for init_time in combined_ds.init_time.values:
-                    # Convert to datetime for calculations
-                    init_datetime = pd.to_datetime(init_time)
-                    
-                    # Process each lead time for this initialization
-                    for lead_time in combined_ds.lead_time.values:
-                        # Calculate the valid time for this forecast point
-                        lead_td = pd.to_timedelta(lead_time)
-                        valid_time = init_datetime + lead_td
-                        lead_hours = int(lead_td.total_seconds() / 3600)
-                        
-                        # Check if this point is within our grid
-                        if valid_time in new_ds.time.values and lead_hours in new_ds.lead_time.values:
-                            # Find indices in our target array
-                            t_idx = np.where(new_ds.time.values == valid_time)[0]
-                            lt_idx = np.where(new_ds.lead_time.values == lead_hours)[0]
-                            
-                            if len(t_idx) > 0 and len(lt_idx) > 0:
-                                # Get the forecast values for all ensemble members
-                                try:
-                                    forecast_values = basin_data.sel(init_time=init_time, lead_time=lead_time).values
-                                    # Store each ensemble member in the correct position
-                                    for e_idx, _ in enumerate(new_ds.ensemble_member.values):
-                                        new_data[b_idx, t_idx[0], lt_idx[0], e_idx] = forecast_values[e_idx]
-                                except (KeyError, ValueError, IndexError) as e:
-                                    # Skip if the specific combination doesn't exist
-                                    continue
-            
-            # Create the new variable in the dataset
-            new_ds[var_name] = xr.DataArray(
-                data=new_data,
-                dims=['basin', 'time', 'lead_time', 'ensemble_member'],
-                coords={
-                    'basin': new_ds.basin,
-                    'time': new_ds.time,
-                    'lead_time': new_ds.lead_time,
-                    'ensemble_member': new_ds.ensemble_member
-                },
-                attrs=var.attrs
-            )
+        # Create a filename with basin and init_time if available
+        if basin != 'Basin':
+            basin_str = str(basin).replace("/", "_").replace(" ", "_")
+            filename = f"{basin_str}_{variable}"
         else:
-            # For variables without ensemble members, just copy them
-            # This handles coordinates and other metadata
-            if not any(dim in var.dims for dim in ['init_time', 'ensemble_member']):
-                new_ds[var_name] = var
+            filename = f"{variable}"
+            
+        if init_time is not None:
+            init_time_str = pd.to_datetime(init_time).strftime('%Y%m%d%H')
+            filename += f"_init_{init_time_str}"
+            
+        filepath = os.path.join(output_dir, f"{filename}_ensemble_members.png")
+        plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
+        print(f"Saved ensemble members plot to {filepath}")
     
-    # Add attributes from the original dataset
-    for attr_name, attr_value in combined_ds.attrs.items():
-        new_ds.attrs[attr_name] = attr_value
-    
-    print("Successfully merged forecasts and restructured dimensions.")
-    return new_ds
+    # Show or close the plot
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+        
+    return fig
 
 
-def plot_basin_temperature_forecasts(combined_ds, output_dir=None):
+def plot_ensemble_statistics(ds, basin=None, init_time=None, variable='temperature_2m',
+                            output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
+    """Plot ensemble statistics (mean, median, min/max range, percentiles).
+    
+    Args:
+        ds (xarray.Dataset): The forecast dataset
+        basin (str, optional): Basin name to plot. If None, uses the first basin in the dataset.
+        init_time (datetime or str, optional): Initialization time to plot. If None, uses the latest.
+        variable (str, optional): Variable to plot. Default is 'temperature_2m'.
+        output_dir (str, optional): Directory to save plot. If None, plot is not saved.
+        show_plot (bool, optional): Whether to display the plot. Default is True.
+        figsize (tuple, optional): Figure size as (width, height). Default is (16, 8).
+        dpi (int, optional): Resolution for saved figure. Default is 150.
+        
+    Returns:
+        matplotlib.figure.Figure: The generated figure
+    """
+    # Check if the variable exists early to avoid unnecessary processing
+    if variable not in ds.data_vars:
+        print(f"Variable '{variable}' not found in dataset. Available variables: {list(ds.data_vars)}")
+        return None
+    
+    # Use .load() to ensure data is in memory for faster processing
+    # Only load the necessary variable and dimensions
+    data_subset = ds[variable].load()
+    
+    # Select specific basin - only select if needed
+    if basin is not None and 'basin' in ds.dims:
+        data_subset = data_subset.sel(basin=basin)
+    elif 'basin' in ds.dims:
+        basin = ds.basin.values[0]  # Use first basin if not specified
+        data_subset = data_subset.sel(basin=basin)
+    else:
+        basin = 'Basin'  # Generic name if basin dimension doesn't exist
+    
+    # Select specific init time - only select if needed
+    if 'init_time' in data_subset.dims:
+        if init_time is not None:
+            data_subset = data_subset.sel(init_time=init_time, method='nearest')
+        else:
+            latest_init_time = data_subset.init_time.values[-1]
+            data_subset = data_subset.sel(init_time=latest_init_time)
+            init_time = latest_init_time
+    
+    # Determine the time dimension to use - do this only once
+    time_dim = next((dim for dim in ['time', 'valid_time', 'lead_time'] 
+                     if dim in data_subset.dims), None)
+    
+    if time_dim is None:
+        print(f"No time dimension found in the dataset. Available dimensions: {list(data_subset.dims)}")
+        return None
+    
+    # Calculate statistics all at once to minimize loop iterations
+    # Use dask optimized functions where possible
+    stats = {
+        'mean': data_subset.mean(dim='ensemble_member'),
+        'median': data_subset.median(dim='ensemble_member'),
+        'min': data_subset.min(dim='ensemble_member'),
+        'max': data_subset.max(dim='ensemble_member')
+    }
+    
+    # Calculate quantiles in a single operation
+    quantiles = data_subset.quantile([0.25, 0.75], dim='ensemble_member')
+    stats['q25'] = quantiles.sel(quantile=0.25)
+    stats['q75'] = quantiles.sel(quantile=0.75)
+    
+    # Compute all statistics at once to optimize dask operations
+    stats = {k: v.compute() for k, v in stats.items()}
+    
+    # Get time values once
+    time_coord = stats['mean'][time_dim]
+    
+    if np.issubdtype(time_coord.dtype, np.timedelta64):
+        # Optimize timedelta handling
+        if init_time is not None:
+            base_time = pd.to_datetime(init_time)
+            # Vectorized operation to convert timedeltas to timestamps
+            time_values = base_time + pd.to_timedelta(time_coord.values)
+        else:
+            # Fast conversion to days for display
+            hours = time_coord.values.astype('timedelta64[h]').astype(float)
+            days = hours / 24.0
+            time_values = np.arange(len(days))
+            # Pre-calculate tick labels
+            tick_labels = [f"Day {d:.1f}" for d in days]
+    elif np.issubdtype(time_coord.dtype, np.datetime64):
+        time_values = time_coord.values  # Keep as numpy array for faster plotting
+    else:
+        time_values = time_coord.values
+    
+    # Create figure only after we know we have data
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Plot with optimized calls
+    ax.plot(time_values, stats['median'], 'b-', linewidth=2.5, label='Median')
+    ax.plot(time_values, stats['mean'], 'r-', linewidth=2.5, label='Mean')
+    ax.fill_between(time_values, stats['q25'], stats['q75'], color='b', alpha=0.2, label='25-75th Percentile')
+    ax.fill_between(time_values, stats['min'], stats['max'], color='b', alpha=0.1, label='Min-Max Range')
+    
+    # Get units from attrs or use default
+    units = data_subset.attrs.get('units', '')
+    
+    # Set title and labels
+    title = f"{variable.replace('_', ' ').title()} Forecast Distribution for {basin}"
+    if init_time is not None:
+        # Format date string once
+        init_time_str = pd.to_datetime(init_time).strftime('%Y-%m-%d %H:%M')
+        title += f" (Init: {init_time_str})"
+    
+    ax.set_title(title)
+    ax.set_ylabel(f"{variable.replace('_', ' ').title()} ({units})")
+    
+    # Set appropriate x-axis label
+    ax.set_xlabel("Time from Forecast Initialization" if time_dim == 'lead_time' else "Forecast Time")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best')
+    
+    # Only format dates if needed
+    if np.issubdtype(time_coord.dtype, np.timedelta64) and init_time is None:
+        # Set pre-calculated tick labels
+        ax.set_xticks(time_values)
+        ax.set_xticklabels(tick_labels)
+    elif np.issubdtype(time_coord.dtype, np.datetime64):
+        fig.autofmt_xdate()
+    
+    plt.tight_layout()
+    
+    # Save the plot if output directory is provided
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Build filename components
+        if basin != 'Basin':
+            basin_str = str(basin).replace("/", "_").replace(" ", "_")
+            filename_parts = [basin_str, variable]
+        else:
+            filename_parts = [variable]
+            
+        if init_time is not None:
+            # Format date string once
+            init_time_str = pd.to_datetime(init_time).strftime('%Y%m%d%H')
+            filename_parts.append(f"init_{init_time_str}")
+            
+        filepath = os.path.join(output_dir, f"{'_'.join(filename_parts)}_statistics.png")
+        plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
+        print(f"Saved ensemble statistics plot to {filepath}")
+    
+    # Show or close the plot
+    if not show_plot:
+        plt.close(fig)
+        
+    return fig
+
+
+def plot_quantile_distribution(ds, basin=None, init_time=None, variable='temperature_2m',
+                              quantiles=[0.05, 0.25, 0.5, 0.75, 0.95],
+                              output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
+    """Plot quantile distribution across ensemble members.
+    
+    Args:
+        ds (xarray.Dataset): The forecast dataset
+        basin (str, optional): Basin name to plot. If None, uses the first basin in the dataset.
+        init_time (datetime or str, optional): Initialization time to plot. If None, uses the latest.
+        variable (str, optional): Variable to plot. Default is 'temperature_2m'.
+        quantiles (list, optional): List of quantiles to plot. Default is [0.05, 0.25, 0.5, 0.75, 0.95].
+        output_dir (str, optional): Directory to save plot. If None, plot is not saved.
+        show_plot (bool, optional): Whether to display the plot. Default is True.
+        figsize (tuple, optional): Figure size as (width, height). Default is (16, 8).
+        dpi (int, optional): Resolution for saved figure. Default is 150.
+        
+    Returns:
+        matplotlib.figure.Figure: The generated figure
+    """
+    # Select specific basin if provided
+    if basin is not None and 'basin' in ds.dims:
+        ds = ds.sel(basin=basin)
+    elif 'basin' in ds.dims:
+        basin = ds.basin.values[0]  # Use first basin if not specified
+        ds = ds.sel(basin=basin)
+    else:
+        basin = 'Basin'  # Generic name if basin dimension doesn't exist
+    
+    # Check if the variable exists
+    if variable not in ds.data_vars:
+        print(f"Variable '{variable}' not found in dataset. Available variables: {list(ds.data_vars)}")
+        return None
+    
+    # Select specific init time if provided, otherwise use the latest
+    if init_time is not None:
+        if 'init_time' in ds.dims:
+            ds = ds.sel(init_time=init_time, method='nearest')
+    elif 'init_time' in ds.dims:
+        latest_init_time = ds.init_time.values[-1]
+        ds = ds.sel(init_time=latest_init_time)
+        init_time = latest_init_time
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Calculate quantiles across ensemble members
+    quantile_data = ds[variable].quantile(quantiles, dim='ensemble_member')
+    
+    # Determine the time dimension to use
+    time_dim = 'time' if 'time' in quantile_data.dims else 'valid_time'
+    if time_dim not in quantile_data.dims and 'lead_time' in quantile_data.dims:
+        # Use lead_time if time dimension is not available
+        time_dim = 'lead_time'
+    
+    # Plot quantiles
+    quantile_data.plot(x=time_dim, hue='quantile', ax=ax)
+    
+    # Get units from attrs or use default
+    units = ds[variable].attrs.get('units', '')
+    
+    # Add title and labels
+    title = f"{variable.replace('_', ' ').title()} Forecast Quantiles for {basin}"
+    if init_time is not None:
+        init_time_str = pd.to_datetime(init_time).strftime('%Y-%m-%d %H:%M')
+        title += f" (Init: {init_time_str})"
+    
+    ax.set_title(title)
+    ax.set_ylabel(f"{variable.replace('_', ' ').title()} ({units})")
+    ax.set_xlabel("Forecast Time")
+    ax.grid(True, alpha=0.3)
+    
+    # Format legend labels to show percentiles
+    handles, labels = ax.get_legend_handles_labels()
+    percentile_labels = [f"{float(q)*100:.0f}th Percentile" for q in quantiles]
+    ax.legend(handles, percentile_labels, title='Forecast Uncertainty', loc='best')
+    
+    plt.tight_layout()
+    
+    # Save the plot if output directory is provided
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Create a filename with basin and init_time if available
+        if basin != 'Basin':
+            basin_str = str(basin).replace("/", "_").replace(" ", "_")
+            filename = f"{basin_str}_{variable}"
+        else:
+            filename = f"{variable}"
+            
+        if init_time is not None:
+            init_time_str = pd.to_datetime(init_time).strftime('%Y%m%d%H')
+            filename += f"_init_{init_time_str}"
+            
+        filepath = os.path.join(output_dir, f"{filename}_quantiles.png")
+        plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
+        print(f"Saved quantile plot to {filepath}")
+    
+    # Show or close the plot
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+        
+    return fig
+
+
+def plot_basin_temperature_forecasts(combined_ds, output_dir=None, show_plot=True):
     """Create plots for temperature forecasts for each basin.
+    
+    This function is maintained for backward compatibility.
+    It now calls the more comprehensive plot_basin_forecasts function.
     
     Args:
         combined_ds (xarray.Dataset): Combined basin forecast dataset
-        output_dir (str, optional): Directory to save plots. If None, just display.
+        output_dir (str, optional): Directory to save plots. If None, plots are not saved.
+        show_plot (bool, optional): Whether to display the plots. Default is True.
     """
-    if combined_ds is None:
-        print("No dataset to plot.")
-        return
-    
-    # Create output directory if specified
+    # Create a plots directory within the output directory
     if output_dir is not None:
-        os.makedirs(output_dir, exist_ok=True)
+        plots_dir = os.path.join(output_dir, "plots")
+    else:
+        plots_dir = None
     
-    # Get unique basins
-    basins = combined_ds.basin.values
-    
-    # Check if temperature variable exists and has ensemble_member dimension
-    if 'temperature_2m' not in combined_ds.data_vars or 'ensemble_member' not in combined_ds['temperature_2m'].dims:
-        print("Temperature variable with ensemble_member dimension not found in the dataset.")
-        return
-    
-    print(f"Creating temperature forecast plots for {len(basins)} basins with "
-          f"{len(combined_ds.ensemble_member)} ensemble members")
-    
-    for basin in basins:
-        # Extract data for this basin
-        basin_ds = combined_ds.sel(basin=basin)
-        
-        # Plot temperature forecast with ensemble members
-        plt.figure(figsize=(14, 8))
-        
-        # Plot each ensemble member as a separate line
-        basin_ds.temperature_2m.plot.line(x='time', hue='ensemble_member', add_legend=False, alpha=0.3)
-        
-        # Add title and labels
-        plt.title(f"Temperature Forecast for {basin}")
-        plt.ylabel(f"Temperature ({basin_ds.temperature_2m.attrs.get('units', 'K')})")
-        plt.xlabel("Time")
-        plt.grid(True, alpha=0.3)
-        
-        # Customize legend (limit to max 10 entries if there are many)
-        if len(combined_ds.ensemble_member) > 10:
-            # Just add a note about the ensemble members without showing individual legends
-            plt.text(0.98, 0.02, f"Showing all {len(combined_ds.ensemble_member)} ensemble members", 
-                     ha='right', va='bottom', transform=plt.gca().transAxes,
-                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        else:
-            # Create a custom legend
-            from matplotlib.lines import Line2D
-            legend_elements = [
-                Line2D([0], [0], color='C0', lw=1, alpha=0.7, 
-                       label=f'Ensemble {i+1}') for i in range(len(combined_ds.ensemble_member))
-            ]
-            plt.legend(handles=legend_elements, loc='upper right')
-        
-        # Save or display the plot
-        if output_dir is not None:
-            # Create a filename-safe version of the basin name
-            basin_filename = str(basin).replace("/", "_").replace(" ", "_")
-            filename = os.path.join(output_dir, f"{basin_filename}_temperature_forecast.png")
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"Saved plot to {filename}")
-        else:
-            plt.tight_layout()
-            plt.show()
-    
-    # Create a visualization showing the ensemble spread
-    for basin in basins:
-        plt.figure(figsize=(14, 8))
-        basin_ds = combined_ds.sel(basin=basin)
-        
-        # Calculate statistics across ensemble members directly from the DataArray
-        ens_mean = basin_ds.temperature_2m.mean(dim='ensemble_member')
-        ens_median = basin_ds.temperature_2m.median(dim='ensemble_member')
-        ens_min = basin_ds.temperature_2m.min(dim='ensemble_member')
-        ens_max = basin_ds.temperature_2m.max(dim='ensemble_member')
-        ens_q25 = basin_ds.temperature_2m.quantile(0.25, dim='ensemble_member')
-        ens_q75 = basin_ds.temperature_2m.quantile(0.75, dim='ensemble_member')
-        
-        # Plot median and min/max range
-        plt.plot(basin_ds.time, ens_median, 'b-', linewidth=2, label='Median')
-        plt.plot(basin_ds.time, ens_mean, 'r-', linewidth=2, label='Mean')
-        plt.fill_between(basin_ds.time, ens_q25, ens_q75, color='b', alpha=0.2, label='25-75th Percentile')
-        plt.fill_between(basin_ds.time, ens_min, ens_max, color='b', alpha=0.1, label='Min-Max Range')
-        
-        plt.title(f"Temperature Forecast Distribution for {basin}")
-        plt.ylabel(f"Temperature ({basin_ds.temperature_2m.attrs.get('units', 'K')})")
-        plt.xlabel("Time")
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        
-        # Save or display the plot
-        if output_dir is not None:
-            basin_filename = str(basin).replace("/", "_").replace(" ", "_")
-            filename = os.path.join(output_dir, f"{basin_filename}_temperature_distribution.png")
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"Saved ensemble distribution plot to {filename}")
-        else:
-            plt.tight_layout()
-            plt.show()
-    
-    # Create a comparative plot of temperature forecasts across all basins
-    if len(basins) > 1:
-        plt.figure(figsize=(14, 10))
-        
-        # Use the ensemble mean for comparison across basins
-        for basin in basins:
-            basin_data = combined_ds.sel(basin=basin).temperature_2m
-            
-            # Calculate mean across ensemble members and lead times
-            basin_mean = basin_data.mean(dim=['ensemble_member', 'lead_time'])
-            plt.plot(basin_mean.time, basin_mean, '-', label=str(basin))
-        
-        plt.title(f"Temperature Forecast Comparison Across Basins (Ensemble Mean)")
-        plt.ylabel(f"Temperature ({combined_ds.temperature_2m.attrs.get('units', 'K')})")
-        plt.xlabel("Time")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        # Save the comparative plot
-        if output_dir is not None:
-            filename = os.path.join(output_dir, "basin_temperature_comparison.png")
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"Saved comparative plot to {filename}")
-        else:
-            plt.show()
+    # Call the comprehensive plotting function with default parameters
+    return plot_basin_forecasts(
+        combined_ds, 
+        variables=['temperature_2m', 'precipitation'] if 'precipitation' in combined_ds.data_vars else ['temperature_2m'],
+        output_dir=plots_dir,
+        show_plot=show_plot
+    )
 
 
 def main():
@@ -366,13 +541,10 @@ def main():
             
             # Get the latest init_time or use a specific one
             # init_time = "2025-01-01T00"  # Example specific time
-            init_time = None  # Use the latest
+            init_time = None  # Use all available init times
             
-            # Extract forecasts for each basin
-            basin_forecasts = fetch_forecasts_for_basins(ds, centroids, init_time)
-            
-            # Merge the basin forecasts into a single dataset
-            combined_ds = merge_basin_forecasts(basin_forecasts)
+            # Extract forecasts for all basins while preserving the original dimensions
+            combined_ds = fetch_forecasts_for_basins(ds, centroids, init_time)
             
             if combined_ds is not None:
                 # Create plots for each basin
@@ -383,16 +555,16 @@ def main():
                 print("This script has:")
                 print("1. Loaded basin centroid coordinates from a CSV file")
                 print("2. Extracted NOAA GEFS forecasts for each basin location")
-                print("3. Combined the individual basin forecasts into a single dataset")
+                print("3. Created a combined dataset with dimensions: basin, init_time, lead_time, ensemble_member")
                 print("4. Generated forecast plots")
                 print(f"\nThe plots are available in {os.path.join(output_dir, 'plots')}")
                 
                 # Return the combined dataset for inspection and further processing
                 print("\nThe combined dataset is available for further processing.")
                 print("Example code to access the dataset:")
-                print("combined_ds.sel(basin='basin_name')")
+                print("combined_ds.sel(basin='basin_name', init_time=combined_ds.init_time[-1])")
             else:
-                print("Failed to merge basin forecasts.")
+                print("Failed to extract basin forecasts.")
         except Exception as e:
             print(f"Error processing NOAA GEFS dataset: {e}")
     else:
