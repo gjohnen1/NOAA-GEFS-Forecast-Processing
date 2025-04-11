@@ -110,6 +110,73 @@ def fetch_forecasts_for_basins(ds, centroids, init_time=None):
     return combined_ds
 
 
+def interpolate_to_hourly(ds, max_hours=240):
+    """Interpolate forecast data to hourly resolution for the first 10 days.
+    
+    This function performs two main operations:
+    1. Shortens the forecast to a specified maximum time horizon (default: 240 hours / 10 days)
+    2. Interpolates the 3-hourly data to hourly resolution using linear interpolation
+    3. Converts the lead_time dimension to integer hours (1-240)
+    
+    Args:
+        ds (xarray.Dataset): The forecast dataset containing the lead_time dimension
+        max_hours (int, optional): Maximum forecast horizon in hours. Default is 240 (10 days).
+        
+    Returns:
+        xarray.Dataset: Dataset with hourly resolution and truncated forecast horizon,
+                        with lead_time dimension as int64 ranging from 1 to max_hours
+    """
+    # Check if lead_time dimension exists
+    if 'lead_time' not in ds.dims:
+        raise ValueError("Dataset must contain a 'lead_time' dimension")
+    
+    # First, limit the forecast to the specified time horizon (default: 10 days)
+    # Convert lead_time to hours if it's a timedelta
+    if isinstance(ds.lead_time.values[0], np.timedelta64):
+        lead_hours = ds.lead_time.dt.total_seconds().values / 3600
+    else:
+        # Assume lead_time is already in hours
+        lead_hours = ds.lead_time.values
+    
+    # Select only lead times up to max_hours
+    ds_shortened = ds.sel(lead_time=ds.lead_time[lead_hours <= max_hours])
+    
+    # Create a new array of hourly lead times as temporary values for interpolation
+    if isinstance(ds.lead_time.values[0], np.timedelta64):
+        # If lead_time is timedelta, create array of hourly timedeltas
+        hourly_lead_times = np.array([np.timedelta64(int(hour), 'h') 
+                                      for hour in range(int(max_hours) + 1)])
+    else:
+        # If lead_time is numeric, create array of hourly values
+        hourly_lead_times = np.arange(0, max_hours + 1, 1)
+    
+    # Create a new dataset with the hourly lead times
+    ds_hourly = ds_shortened.interp(lead_time=hourly_lead_times, method='linear')
+    
+    # Create a new lead_time coordinate with integer hours from 1 to max_hours
+    # We exclude hour 0 as requested, starting at hour 1
+    new_lead_time = np.arange(1, max_hours + 1, dtype=np.int64)
+    
+    # Convert the dataset to use the new integer lead_time dimension
+    # First, we need to select all but the first time step (to skip hour 0)
+    ds_hourly = ds_hourly.isel(lead_time=slice(1, None))
+    
+    # Now assign the new coordinate
+    ds_hourly = ds_hourly.assign_coords(lead_time=new_lead_time)
+    
+    # Update the lead_time attributes to indicate it's now in hours
+    ds_hourly.lead_time.attrs['units'] = 'hours'
+    ds_hourly.lead_time.attrs['long_name'] = 'Lead time in hours'
+    
+    # Add metadata to indicate that the dataset has been interpolated
+    ds_hourly.attrs['interpolation'] = 'Linear interpolation to hourly resolution'
+    ds_hourly.attrs['original_resolution'] = '3-hourly for first 10 days'
+    ds_hourly.attrs['max_forecast_hours'] = max_hours
+    ds_hourly.attrs['lead_time_format'] = 'Integer hours from 1 to 240'
+    
+    return ds_hourly
+
+
 def plot_ensemble_members(ds, basin=None, init_time=None, variable='temperature_2m', 
                           output_dir=None, show_plot=True, figsize=(16, 8), dpi=150):
     """Plot all ensemble members for a specific variable.
