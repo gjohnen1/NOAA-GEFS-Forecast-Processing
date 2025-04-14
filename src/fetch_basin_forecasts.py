@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import xarray as xr
 from datetime import datetime, timedelta
+from typing import Optional, List, Tuple, Union
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import warnings
@@ -21,14 +22,14 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-def load_basin_centroids(file_path):
+def load_basin_centroids(file_path: str) -> Optional[pd.DataFrame]:
     """Load basin centroid coordinates from CSV.
     
     Args:
         file_path (str): Path to the basin centroids CSV file
         
     Returns:
-        pandas.DataFrame: DataFrame containing basin names and coordinates
+        Optional[pd.DataFrame]: DataFrame containing basin names and coordinates, or None on error.
     """
     try:
         centroids = pd.read_csv(file_path)
@@ -39,18 +40,18 @@ def load_basin_centroids(file_path):
         return None
 
 
-def extract_forecast_for_basin(ds, basin_name, latitude, longitude, init_time=None):
+def extract_forecast_for_basin(ds: xr.Dataset, basin_name: str, latitude: float, longitude: float, init_time: Optional[str] = None) -> xr.Dataset:
     """Extract forecast data for a specific basin point.
     
     Args:
-        ds (xarray.Dataset): NOAA GEFS forecast dataset
+        ds (xr.Dataset): NOAA GEFS forecast dataset
         basin_name (str): Name of the basin
         latitude (float): Latitude of the basin centroid
         longitude (float): Longitude of the basin centroid
-        init_time (str, optional): Initial forecast time. If None, use all available times.
+        init_time (Optional[str]): Initial forecast time (e.g., 'YYYY-MM-DDTHH'). If None, use all available times.
         
     Returns:
-        xarray.Dataset: Forecast data for the basin
+        xr.Dataset: Forecast data for the basin
     """
     # Select the init time if provided
     if init_time is not None:
@@ -68,16 +69,16 @@ def extract_forecast_for_basin(ds, basin_name, latitude, longitude, init_time=No
     return basin_ds
 
 
-def fetch_forecasts_for_basins(ds, centroids, init_time=None):
+def fetch_forecasts_for_basins(ds: xr.Dataset, centroids: pd.DataFrame, init_time: Optional[str] = None) -> xr.Dataset:
     """Extract forecasts for all basin centroids while preserving original dimensions.
     
     Args:
-        ds (xarray.Dataset): NOAA GEFS forecast dataset
-        centroids (pandas.DataFrame): DataFrame with basin centroid coordinates
-        init_time (str, optional): Initial forecast time. If None, use all available times.
+        ds (xr.Dataset): NOAA GEFS forecast dataset
+        centroids (pd.DataFrame): DataFrame with basin centroid coordinates
+        init_time (Optional[str]): Initial forecast time (e.g., 'YYYY-MM-DDTHH'). If None, use all available times.
         
     Returns:
-        xarray.Dataset: Combined dataset with basin dimension replacing lat/lon
+        xr.Dataset: Combined dataset with basin dimension replacing lat/lon
     """
     # Select the init time if provided, otherwise use all times
     if init_time is not None:
@@ -110,7 +111,7 @@ def fetch_forecasts_for_basins(ds, centroids, init_time=None):
     return combined_ds
 
 
-def interpolate_to_hourly(ds, max_hours=240):
+def interpolate_to_hourly(ds: xr.Dataset, max_hours: int = 240) -> xr.Dataset:
     """Interpolate forecast data to hourly resolution for the first 10 days.
     
     This function performs two main operations:
@@ -119,11 +120,11 @@ def interpolate_to_hourly(ds, max_hours=240):
     3. Converts the lead_time dimension to integer hours (1-240)
     
     Args:
-        ds (xarray.Dataset): The forecast dataset containing the lead_time dimension
+        ds (xr.Dataset): The forecast dataset containing the lead_time dimension
         max_hours (int, optional): Maximum forecast horizon in hours. Default is 240 (10 days).
         
     Returns:
-        xarray.Dataset: Dataset with hourly resolution and truncated forecast horizon,
+        xr.Dataset: Dataset with hourly resolution and truncated forecast horizon,
                         with lead_time dimension as int64 ranging from 1 to max_hours
     """
     # Check if lead_time dimension exists
@@ -176,26 +177,106 @@ def interpolate_to_hourly(ds, max_hours=240):
     return ds_hourly
 
 
-def plot_basin_forecast(ds, basin_name, init_time, variable):
+def plot_basin_forecast(
+    ds: xr.Dataset, 
+    basin_name: str, 
+    init_time: Union[str, np.datetime64, datetime], 
+    variable: str, 
+    uncertainty_quantiles: Optional[Union[List[float], Tuple[float, float]]] = None, 
+    show_members: bool = True
+) -> None:
     """Plots the forecast ensemble for a specific basin, init time, and variable.
+       Optionally plots median and uncertainty bands instead of all members.
 
     Args:
-        ds (xarray.Dataset): The forecast dataset (e.g., basin_forecasts_hourly).
+        ds (xr.Dataset): The forecast dataset (e.g., basin_forecasts_hourly).
                              Must have dimensions 'basin', 'init_time', 'lead_time', 'ensemble_member'.
         basin_name (str): The name of the basin to plot.
-        init_time (str or datetime): The initialization time for the forecast.
+        init_time (Union[str, np.datetime64, datetime]): The initialization time for the forecast.
         variable (str): The name of the variable to plot (e.g., 'temperature_2m').
+        uncertainty_quantiles (Optional[Union[List[float], Tuple[float, float]]]): 
+                                                        A list/tuple of two floats (0-1)
+                                                        representing the lower and upper quantiles
+                                                        for the uncertainty band (e.g., [0.05, 0.95]).
+                                                        If provided, plots median and shaded band.
+                                                        Defaults to None (plots all members).
+        show_members (bool): If uncertainty_quantiles is provided, setting this to True
+                             will also plot individual members lightly in the background.
+                             Defaults to True.
     """
+    # --- Input Validation ---
+    if 'basin' not in ds.coords or basin_name not in ds['basin'].values:
+        print(f"Error: Basin '{basin_name}' not found in dataset coordinates.")
+        print(f"Available basins: {list(ds['basin'].values)}")
+        return
+        
     try:
-        # Select the specific data slice
-        forecast_slice = ds.sel(basin=basin_name, init_time=init_time)[variable]
+        # Attempt to convert init_time to datetime64 for consistent comparison
+        init_time_dt64 = np.datetime64(init_time)
+        if init_time_dt64 not in ds['init_time'].values:
+             available_times = pd.to_datetime(ds['init_time'].values)
+             print(f"Error: Initialization time '{init_time}' not found in dataset.")
+             print(f"Latest available init_time: {available_times.max()}")
+             return
+    except Exception as e:
+        print(f"Error processing init_time '{init_time}': {e}")
+        return
 
-        # Create the plot using xarray's plotting functionality
+    if variable not in ds.data_vars:
+        print(f"Error: Variable '{variable}' not found in dataset.")
+        print(f"Available variables: {list(ds.data_vars)}")
+        return
+        
+    plot_uncertainty = False
+    if uncertainty_quantiles is not None:
+        if not isinstance(uncertainty_quantiles, (list, tuple)) or len(uncertainty_quantiles) != 2:
+            print("Error: uncertainty_quantiles must be a list or tuple of two floats (e.g., [0.05, 0.95]).")
+            return
+        q_low, q_high = uncertainty_quantiles
+        if not (0 <= q_low < q_high <= 1):
+            print("Error: uncertainty_quantiles must be between 0 and 1, with the first value smaller than the second.")
+            return
+        plot_uncertainty = True
+        
+    # --- Plotting Logic ---
+    try:
+        # Select the specific data slice using validated inputs
+        forecast_slice = ds.sel(basin=basin_name, init_time=init_time_dt64)[variable]
+        lead_time_values = forecast_slice['lead_time'].values
+
+        # Create the plot
         plt.figure(figsize=(12, 6))
-        forecast_slice.plot.line(x='lead_time', hue='ensemble_member', add_legend=False)
+        ax = plt.gca() # Get current axes
+
+        if plot_uncertainty:
+            # Calculate quantiles
+            q_lower = forecast_slice.quantile(uncertainty_quantiles[0], dim="ensemble_member")
+            q_median = forecast_slice.quantile(0.5, dim="ensemble_member")
+            q_upper = forecast_slice.quantile(uncertainty_quantiles[1], dim="ensemble_member")
+
+            # Plot median
+            q_median.plot(ax=ax, color='black', linewidth=2, label='Median')
+
+            # Plot uncertainty band
+            ax.fill_between(lead_time_values, q_lower.values, q_upper.values, color='skyblue', alpha=0.4, label=f'{uncertainty_quantiles[0]*100:.0f}-{uncertainty_quantiles[1]*100:.0f}% Quantile Range')
+
+            # Optionally plot members lightly
+            if show_members:
+                 forecast_slice.plot.line(ax=ax, x='lead_time', hue='ensemble_member', add_legend=False, linewidth=0.5, alpha=0.3, color='grey')
+
+            print(f"Plot generated with median and {uncertainty_quantiles} uncertainty band.")
+            ax.legend() # Show legend for median and band
+
+        elif show_members: # Only plot members if show_members is True and not plotting uncertainty band only
+            # Default: plot all ensemble members
+            forecast_slice.plot.line(ax=ax, x='lead_time', hue='ensemble_member', add_legend=False)
+            print("Plot generated showing all ensemble members.")
+        else:
+             print("Plot generated with no elements (uncertainty band not requested, show_members=False).")
+
 
         # Customize the plot
-        plt.title(f"Forecast for {variable} in {basin_name}\nInitialization Time: {pd.to_datetime(init_time).strftime('%Y-%m-%d %H:%M')}")
+        plt.title(f"Forecast for {variable} in {basin_name}\nInitialization Time: {pd.to_datetime(init_time_dt64).strftime('%Y-%m-%d %H:%M')}")
         plt.xlabel("Lead Time (hours)")
         y_label = f"{variable} ({ds[variable].attrs.get('units', 'N/A')})"
         plt.ylabel(y_label)
@@ -203,25 +284,12 @@ def plot_basin_forecast(ds, basin_name, init_time, variable):
 
         print(f"Plot generated for: Basin='{basin_name}', Init Time='{init_time}', Variable='{variable}'")
 
-    except KeyError as e:
-        print(f"Error: Could not find data for the specified selection. Details: {e}")
-        print(f"Available basins: {list(ds['basin'].values)}")
-        print(f"Available variables: {list(ds.data_vars)}")
-        # Ensure init_time is comparable
-        try:
-            init_time_dt = pd.to_datetime(init_time)
-            available_times = pd.to_datetime(ds['init_time'].values)
-            if init_time_dt not in available_times:
-                print(f"Specified init_time '{init_time}' not found in dataset.")
-                print(f"Latest available init_time: {available_times.max()}")
-        except Exception as time_err:
-            print(f"Could not verify init_time: {time_err}")
 
     except Exception as e:
         print(f"An unexpected error occurred during plotting: {e}")
 
 
-def main():
+def main() -> None:
     """Main function to run the basin forecast extraction process."""
     # Define paths for input and output data
     basin_centroids_file = "../data/basin_centroids.csv"
@@ -238,11 +306,10 @@ def main():
     if centroids is not None:
         # Open the NOAA GEFS dataset
         print("Loading NOAA GEFS dataset...")
+        # Define Zarr URL (Consider moving to config or args)
+        zarr_url = "https://data.dynamical.org/noaa/gefs/forecast-35-day/latest.zarr?email=optional@email.com"
         try:
-            ds = xr.open_zarr(
-                "https://data.dynamical.org/noaa/gefs/forecast-35-day/latest.zarr?email=optional@email.com", 
-                decode_timedelta=True
-            )
+            ds = xr.open_zarr(zarr_url, decode_timedelta=True)
             
             # Get the latest init_time or use a specific one
             # init_time = "2025-01-01T00"  # Example specific time
@@ -265,7 +332,7 @@ def main():
             else:
                 print("Failed to extract basin forecasts.")
         except Exception as e:
-            print(f"Error processing NOAA GEFS dataset: {e}")
+            print(f"Error processing NOAA GEFS dataset from {zarr_url}: {e}")
     else:
         print("Failed to load basin centroids. Please check the input file and try again.")
 
