@@ -8,10 +8,14 @@ __pycache__/
 
 # Data and output files (generated, not tracked)
 data/*.nc
-data/*.zarr
+data/*/*.zarr
 data/*.csv
 data/basin_shapefiles/*
 data/processed_data/*
+
+# ignore everything within folders with .zarr
+
+
 
 # Log files
 *.log
