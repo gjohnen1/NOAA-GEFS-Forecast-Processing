@@ -176,6 +176,49 @@ def interpolate_to_hourly(ds, max_hours=240):
     return ds_hourly
 
 
+def plot_basin_forecast(ds, basin_name, init_time, variable):
+    """Plots the forecast ensemble for a specific basin, init time, and variable.
+
+    Args:
+        ds (xarray.Dataset): The forecast dataset (e.g., basin_forecasts_hourly).
+                             Must have dimensions 'basin', 'init_time', 'lead_time', 'ensemble_member'.
+        basin_name (str): The name of the basin to plot.
+        init_time (str or datetime): The initialization time for the forecast.
+        variable (str): The name of the variable to plot (e.g., 'temperature_2m').
+    """
+    try:
+        # Select the specific data slice
+        forecast_slice = ds.sel(basin=basin_name, init_time=init_time)[variable]
+
+        # Create the plot using xarray's plotting functionality
+        plt.figure(figsize=(12, 6))
+        forecast_slice.plot.line(x='lead_time', hue='ensemble_member', add_legend=False)
+
+        # Customize the plot
+        plt.title(f"Forecast for {variable} in {basin_name}\nInitialization Time: {pd.to_datetime(init_time).strftime('%Y-%m-%d %H:%M')}")
+        plt.xlabel("Lead Time (hours)")
+        y_label = f"{variable} ({ds[variable].attrs.get('units', 'N/A')})"
+        plt.ylabel(y_label)
+        plt.grid(True, linestyle='--', alpha=0.6)
+
+        print(f"Plot generated for: Basin='{basin_name}', Init Time='{init_time}', Variable='{variable}'")
+
+    except KeyError as e:
+        print(f"Error: Could not find data for the specified selection. Details: {e}")
+        print(f"Available basins: {list(ds['basin'].values)}")
+        print(f"Available variables: {list(ds.data_vars)}")
+        # Ensure init_time is comparable
+        try:
+            init_time_dt = pd.to_datetime(init_time)
+            available_times = pd.to_datetime(ds['init_time'].values)
+            if init_time_dt not in available_times:
+                print(f"Specified init_time '{init_time}' not found in dataset.")
+                print(f"Latest available init_time: {available_times.max()}")
+        except Exception as time_err:
+            print(f"Could not verify init_time: {time_err}")
+
+    except Exception as e:
+        print(f"An unexpected error occurred during plotting: {e}")
 
 
 def main():
