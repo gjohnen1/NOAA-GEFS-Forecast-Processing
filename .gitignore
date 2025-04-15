@@ -9,6 +9,7 @@ __pycache__/
 # Data and output files (generated, not tracked)
 data/*.nc
 data/*/*.zarr
+data/*/*.nc
 data/*.csv
 data/basin_shapefiles/*
 data/processed_data/*
