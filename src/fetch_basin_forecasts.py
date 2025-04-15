@@ -14,8 +14,6 @@ import numpy as np
 import xarray as xr
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Union
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import warnings
 
 # Suppress warnings
@@ -175,118 +173,6 @@ def interpolate_to_hourly(ds: xr.Dataset, max_hours: int = 240) -> xr.Dataset:
     ds_hourly.attrs['lead_time_format'] = 'Integer hours from 1 to 240'
     
     return ds_hourly
-
-
-def plot_basin_forecast(
-    ds: xr.Dataset, 
-    basin_name: str, 
-    init_time: Union[str, np.datetime64, datetime], 
-    variable: str, 
-    uncertainty_quantiles: Optional[Union[List[float], Tuple[float, float]]] = None, 
-    show_members: bool = True
-) -> None:
-    """Plots the forecast ensemble for a specific basin, init time, and variable.
-       Optionally plots median and uncertainty bands instead of all members.
-
-    Args:
-        ds (xr.Dataset): The forecast dataset (e.g., basin_forecasts_hourly).
-                             Must have dimensions 'basin', 'init_time', 'lead_time', 'ensemble_member'.
-        basin_name (str): The name of the basin to plot.
-        init_time (Union[str, np.datetime64, datetime]): The initialization time for the forecast.
-        variable (str): The name of the variable to plot (e.g., 'temperature_2m').
-        uncertainty_quantiles (Optional[Union[List[float], Tuple[float, float]]]): 
-                                                        A list/tuple of two floats (0-1)
-                                                        representing the lower and upper quantiles
-                                                        for the uncertainty band (e.g., [0.05, 0.95]).
-                                                        If provided, plots median and shaded band.
-                                                        Defaults to None (plots all members).
-        show_members (bool): If uncertainty_quantiles is provided, setting this to True
-                             will also plot individual members lightly in the background.
-                             Defaults to True.
-    """
-    # --- Input Validation ---
-    if 'basin' not in ds.coords or basin_name not in ds['basin'].values:
-        print(f"Error: Basin '{basin_name}' not found in dataset coordinates.")
-        print(f"Available basins: {list(ds['basin'].values)}")
-        return
-        
-    try:
-        # Attempt to convert init_time to datetime64 for consistent comparison
-        init_time_dt64 = np.datetime64(init_time)
-        if init_time_dt64 not in ds['init_time'].values:
-             available_times = pd.to_datetime(ds['init_time'].values)
-             print(f"Error: Initialization time '{init_time}' not found in dataset.")
-             print(f"Latest available init_time: {available_times.max()}")
-             return
-    except Exception as e:
-        print(f"Error processing init_time '{init_time}': {e}")
-        return
-
-    if variable not in ds.data_vars:
-        print(f"Error: Variable '{variable}' not found in dataset.")
-        print(f"Available variables: {list(ds.data_vars)}")
-        return
-        
-    plot_uncertainty = False
-    if uncertainty_quantiles is not None:
-        if not isinstance(uncertainty_quantiles, (list, tuple)) or len(uncertainty_quantiles) != 2:
-            print("Error: uncertainty_quantiles must be a list or tuple of two floats (e.g., [0.05, 0.95]).")
-            return
-        q_low, q_high = uncertainty_quantiles
-        if not (0 <= q_low < q_high <= 1):
-            print("Error: uncertainty_quantiles must be between 0 and 1, with the first value smaller than the second.")
-            return
-        plot_uncertainty = True
-        
-    # --- Plotting Logic ---
-    try:
-        # Select the specific data slice using validated inputs
-        forecast_slice = ds.sel(basin=basin_name, init_time=init_time_dt64)[variable]
-        lead_time_values = forecast_slice['lead_time'].values
-
-        # Create the plot
-        plt.figure(figsize=(12, 6))
-        ax = plt.gca() # Get current axes
-
-        if plot_uncertainty:
-            # Calculate quantiles
-            q_lower = forecast_slice.quantile(uncertainty_quantiles[0], dim="ensemble_member")
-            q_median = forecast_slice.quantile(0.5, dim="ensemble_member")
-            q_upper = forecast_slice.quantile(uncertainty_quantiles[1], dim="ensemble_member")
-
-            # Plot median
-            q_median.plot(ax=ax, color='black', linewidth=2, label='Median')
-
-            # Plot uncertainty band
-            ax.fill_between(lead_time_values, q_lower.values, q_upper.values, color='skyblue', alpha=0.4, label=f'{uncertainty_quantiles[0]*100:.0f}-{uncertainty_quantiles[1]*100:.0f}% Quantile Range')
-
-            # Optionally plot members lightly
-            if show_members:
-                 forecast_slice.plot.line(ax=ax, x='lead_time', hue='ensemble_member', add_legend=False, linewidth=0.5, alpha=0.3, color='grey')
-
-            print(f"Plot generated with median and {uncertainty_quantiles} uncertainty band.")
-            ax.legend() # Show legend for median and band
-
-        elif show_members: # Only plot members if show_members is True and not plotting uncertainty band only
-            # Default: plot all ensemble members
-            forecast_slice.plot.line(ax=ax, x='lead_time', hue='ensemble_member', add_legend=False)
-            print("Plot generated showing all ensemble members.")
-        else:
-             print("Plot generated with no elements (uncertainty band not requested, show_members=False).")
-
-
-        # Customize the plot
-        plt.title(f"Forecast for {variable} in {basin_name}\nInitialization Time: {pd.to_datetime(init_time_dt64).strftime('%Y-%m-%d %H:%M')}")
-        plt.xlabel("Lead Time (hours)")
-        y_label = f"{variable} ({ds[variable].attrs.get('units', 'N/A')})"
-        plt.ylabel(y_label)
-        plt.grid(True, linestyle='--', alpha=0.6)
-
-        print(f"Plot generated for: Basin='{basin_name}', Init Time='{init_time}', Variable='{variable}'")
-
-
-    except Exception as e:
-        print(f"An unexpected error occurred during plotting: {e}")
 
 
 def main() -> None:
