@@ -11,6 +11,7 @@ import openmeteo_requests
 import requests_cache
 import pandas as pd
 import xarray as xr
+import numpy as np
 from retry_requests import retry
 from typing import List, Dict, Optional
 
@@ -61,7 +62,8 @@ def fetch_historical_for_basins(
             "start_date": start_date,
             "end_date": end_date,
             "hourly": hourly_variables,
-            "models": "best_match" # Uses ERA5 Land / ERA5 depending on availability
+            "models": "best_match", # Uses ERA5 Land / ERA5 depending on availability
+            "timezone": "UTC"  # Explicitly request UTC timezone
         }
         
         try:
@@ -73,8 +75,8 @@ def fetch_historical_for_basins(
             
             # Create time range
             time_range = pd.date_range(
-                start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
-                end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+                start=pd.to_datetime(hourly.Time(), unit="s", utc=True),  # Ensure UTC timezone
+                end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),  # Ensure UTC timezone
                 freq=pd.Timedelta(seconds=hourly.Interval()),
                 inclusive="left"
             )
@@ -89,8 +91,19 @@ def fetch_historical_for_basins(
             hourly_df = hourly_df.set_index('time') # Set time as index for xarray conversion
             
             # Convert to xarray Dataset
-            basin_ds = xr.Dataset.from_dataframe(hourly_df)
-            basin_ds = basin_ds.assign_coords(basin=basin_name) # Add basin coordinate
+            # Explicitly create dataset and coordinates for better dtype control
+            data_vars = {}
+            for col in hourly_df.columns:
+                # Ensure data is float32 or appropriate type, handle potential NaNs
+                data_vars[col] = (('time'), hourly_df[col].astype(np.float32).values) 
+                
+            basin_ds = xr.Dataset(
+                data_vars,
+                coords={
+                    'time': hourly_df.index.values, # Should be datetime64[ns] from date_range
+                    'basin': basin_name 
+                }
+            )
             basin_ds = basin_ds.expand_dims('basin') # Make basin a dimension
             
             # Add metadata from response
